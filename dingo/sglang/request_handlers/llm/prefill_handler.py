@@ -12,7 +12,10 @@ from dynamo.health_check import HEALTH_CHECK_KEY
 from dingo.sglang.args import Config
 from dingo.sglang.publisher import DynamoSglangPublisher
 from dingo.sglang.request_handlers.handler_base import BaseWorkerHandler
-from dingo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
+from dingo.sglang.request_handlers.llm.decode_handler import (
+    _preprocessed_stop_sampling_params,
+    _sampling_option_params,
+)
 from dingo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
     raise_if_unextracted_multimodal,
@@ -90,6 +93,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             sampling_params = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
+                **_preprocessed_stop_sampling_params(stop_conditions),
                 **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")

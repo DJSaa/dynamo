@@ -963,6 +963,7 @@ class SglangLLMEngine(LLMEngine):
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
+                "stop": stop_conditions.get("stop") or None,
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")
                 ),
