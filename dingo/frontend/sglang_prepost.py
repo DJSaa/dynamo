@@ -113,6 +113,59 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "kimi-k3": "kimi_k3",
 }
 
+_KIMI_K3_THINK_OPEN = "<|open|>think<|sep|>"
+_KIMI_K3_THINK_CLOSE = "<|close|>think<|sep|>"
+_KIMI_K3_THINK_CLOSE_WITHOUT_SEP = "<|close|>think"
+_KIMI_K3_RESPONSE_OPEN = "<|open|>response<|sep|>"
+_KIMI_K3_RESPONSE_CLOSE = "<|close|>response<|sep|>"
+_KIMI_K3_MESSAGE_CLOSE = "<|close|>message<|sep|>"
+_KIMI_K3_CONTROL_MARKERS = (
+    _KIMI_K3_THINK_OPEN,
+    _KIMI_K3_THINK_CLOSE,
+    _KIMI_K3_RESPONSE_OPEN,
+    _KIMI_K3_RESPONSE_CLOSE,
+    _KIMI_K3_MESSAGE_CLOSE,
+    _KIMI_K3_THINK_CLOSE_WITHOUT_SEP,
+)
+
+
+def _strip_kimi_k3_control_markers(text: str | None) -> str:
+    """Remove Kimi-K3 XTML markers that escaped the upstream parser."""
+    if not text:
+        return ""
+    for marker in _KIMI_K3_CONTROL_MARKERS:
+        text = text.replace(marker, "")
+    return text
+
+
+def _recover_kimi_k3_response(text: str) -> str:
+    """Recover a response body misclassified as reasoning by malformed XTML.
+
+    Kimi-K3 occasionally omits ``<|sep|>`` after the think close marker. The
+    SGLang detector then keeps the following response in reasoning until EOS.
+    Only recover when a response boundary is still present; a bare marker-only
+    completion is intentionally left empty instead of exposing protocol noise.
+    """
+    think_close_idx = text.find(_KIMI_K3_THINK_CLOSE_WITHOUT_SEP)
+    if think_close_idx == -1:
+        return ""
+
+    tail = text[think_close_idx + len(_KIMI_K3_THINK_CLOSE_WITHOUT_SEP) :]
+    if tail.startswith("<|sep|>"):
+        tail = tail[len("<|sep|>") :]
+
+    response_open_idx = tail.find(_KIMI_K3_RESPONSE_OPEN)
+    response_close_idx = tail.find(_KIMI_K3_RESPONSE_CLOSE)
+    if response_open_idx != -1:
+        tail = tail[response_open_idx + len(_KIMI_K3_RESPONSE_OPEN) :]
+        response_close_idx = tail.find(_KIMI_K3_RESPONSE_CLOSE)
+    elif response_close_idx == -1:
+        return ""
+
+    if response_close_idx != -1:
+        tail = tail[:response_close_idx]
+    return _strip_kimi_k3_control_markers(tail).strip()
+
 
 def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
     if not parser_name:
@@ -964,6 +1017,7 @@ class SglangStreamingPostProcessor:
         self._tool_call_parser_name = _normalize_sglang_parser_name(
             tool_call_parser_name
         )
+        self._is_kimi_k3 = self._tool_call_parser_name == "kimi_k3"
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a tool call parser is active so
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
@@ -985,6 +1039,8 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        self._kimi_k3_raw_text_parts: list[str] = []
+        self._saw_normal_output = False
 
     def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
         if not self._eos_token_ids:
@@ -1080,6 +1136,8 @@ class SglangStreamingPostProcessor:
             if token_ids or finished
             else ""
         )
+        if self._is_kimi_k3 and delta_text:
+            self._kimi_k3_raw_text_parts.append(delta_text)
 
         if self._fast_plain_text:
             if delta_text:
@@ -1106,6 +1164,8 @@ class SglangStreamingPostProcessor:
             r_text, n_text = self.reasoning_parser.parse_stream_chunk(delta_text)
             reasoning_text = r_text or None
             normal_text = n_text or ""
+        if self._is_kimi_k3:
+            reasoning_text = _strip_kimi_k3_control_markers(reasoning_text) or None
 
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
@@ -1133,6 +1193,11 @@ class SglangStreamingPostProcessor:
                     self._tool_call_names[idx] = tc.name
                 if tc.parameters:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
+
+        if self._is_kimi_k3:
+            content_text = _strip_kimi_k3_control_markers(content_text)
+        if content_text:
+            self._saw_normal_output = True
 
         # -- Assemble delta --
         delta: dict[str, Any] = {"role": "assistant"}
@@ -1282,6 +1347,20 @@ class SglangStreamingPostProcessor:
                     "Dropping incomplete SGLang tool calls with no valid arguments: %s",
                     dropped_names,
                 )
+
+        if (
+            finish_reason
+            and self._is_kimi_k3
+            and not self._saw_normal_output
+            and not self._tool_call_names
+        ):
+            recovered_content = _recover_kimi_k3_response(
+                "".join(self._kimi_k3_raw_text_parts)
+            )
+            if recovered_content:
+                delta["content"] = recovered_content
+                has_content = True
+                self._saw_normal_output = True
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []

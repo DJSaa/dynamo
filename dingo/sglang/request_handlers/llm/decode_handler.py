@@ -60,6 +60,36 @@ def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     return params
 
 
+def _preprocessed_stop_sampling_params(
+    stop_conditions: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Map Dynamo stop conditions to SGLang sampling parameters.
+
+    Anthropic ``stop_sequences`` is normalized to ``stop_conditions.stop`` by
+    the frontend. Keep that string stop list intact when handing the request to
+    SGLang; otherwise only max-token/EOS conditions reach the engine and the
+    requested sequence is generated instead of terminating the request.
+    """
+    params: Dict[str, Any] = {}
+
+    stop = stop_conditions.get("stop")
+    if isinstance(stop, str):
+        if stop:
+            params["stop"] = stop
+    elif isinstance(stop, list) and stop and all(
+        isinstance(item, str) for item in stop
+    ):
+        params["stop"] = stop
+
+    hidden_stop_token_ids = stop_conditions.get("stop_token_ids_hidden") or []
+    plain_stop_token_ids = stop_conditions.get("stop_token_ids") or []
+    stop_token_ids = list(set(hidden_stop_token_ids).union(plain_stop_token_ids))
+    if stop_token_ids:
+        params["stop_token_ids"] = stop_token_ids
+
+    return params
+
+
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
     stop_conditions = request.get("stop_conditions")
     if isinstance(stop_conditions, dict):
@@ -271,16 +301,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
 
-            _hidden = stop_conditions.get("stop_token_ids_hidden") or []
-            _plain = stop_conditions.get("stop_token_ids") or []
-            _merged = list(set(_hidden).union(_plain))
-            stop_token_ids = _merged if _merged else None
-
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
-                "stop_token_ids": stop_token_ids,
+                **_preprocessed_stop_sampling_params(stop_conditions),
                 **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")

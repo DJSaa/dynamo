@@ -2370,6 +2370,59 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert "think about this" in reasoning
         assert "42" in content
 
+    class _LiteralTokenizer:
+        def __init__(self, texts: dict[int, str]) -> None:
+            self.texts = texts
+
+        def decode(
+            self, token_ids: list[int], *, skip_special_tokens: bool
+        ) -> str:
+            return "".join(self.texts[token_id] for token_id in token_ids)
+
+    class _AllReasoningParser:
+        def parse_stream_chunk(self, text: str) -> tuple[str, str]:
+            return text, ""
+
+    def test_kimi_k3_strips_malformed_control_markers(self) -> None:
+        text = (
+            "<|close|>thinkIDTHOOK_OUTPUT"
+            "<|close|>think<|close|>message<|sep|>"
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self._LiteralTokenizer({1: text}),
+            tool_call_parser=None,
+            reasoning_parser=self._AllReasoningParser(),
+            tool_call_parser_name="kimi_k3",
+        )
+
+        choice = post.process_output({"token_ids": [1], "finish_reason": "stop"})
+
+        assert choice is not None
+        delta = choice["delta"]
+        assert delta.get("content", "") == ""
+        assert delta["reasoning_content"] == "IDTHOOK_OUTPUT"
+        assert "<|" not in delta["reasoning_content"]
+
+    def test_kimi_k3_recovers_response_misclassified_as_reasoning(self) -> None:
+        text = (
+            "Check the tool result.<|close|>think"
+            "最终答复。<|close|>response<|sep|>"
+            "<|close|>message<|sep|>"
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self._LiteralTokenizer({1: text}),
+            tool_call_parser=None,
+            reasoning_parser=self._AllReasoningParser(),
+            tool_call_parser_name="kimi_k3",
+        )
+
+        choice = post.process_output({"token_ids": [1], "finish_reason": "stop"})
+
+        assert choice is not None
+        delta = choice["delta"]
+        assert delta["content"] == "最终答复。"
+        assert "<|" not in delta["reasoning_content"]
+
 
 # ---------------------------------------------------------------------------
 # Utility functions

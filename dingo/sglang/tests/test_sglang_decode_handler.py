@@ -13,6 +13,7 @@ from dingo.sglang.request_handlers.llm.decode_handler import (
     _extract_sglang_stop_reason,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
+    _preprocessed_stop_sampling_params,
     _user_stop_token_ids,
 )
 from dingo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -147,6 +148,23 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     }
 
 
+def test_preprocessed_stop_sampling_params_preserves_anthropic_stop_sequences():
+    assert _preprocessed_stop_sampling_params(
+        {"stop": ["</block>", "</answer>"]}
+    ) == {"stop": ["</block>", "</answer>"]}
+
+
+def test_preprocessed_stop_sampling_params_merges_stop_token_ids():
+    params = _preprocessed_stop_sampling_params(
+        {
+            "stop_token_ids": [32, 34],
+            "stop_token_ids_hidden": [34, 128001],
+        }
+    )
+
+    assert set(params["stop_token_ids"]) == {32, 34, 128001}
+
+
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.use_sglang_tokenizer = use_sglang_tokenizer
@@ -186,6 +204,23 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["n"] == 3
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
+
+
+def test_build_sampling_params_forwards_anthropic_stop_sequences():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"temperature": 0.0, "n": 1},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "stop": ["</block>"],
+            },
+        }
+    )
+
+    assert sampling_params["stop"] == ["</block>"]
+    assert sampling_params["max_new_tokens"] == 64
 
 
 def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
